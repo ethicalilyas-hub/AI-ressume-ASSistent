@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 MAX_RESUME_CHARS = 15000
 MAX_JD_CHARS = 6000
 MAX_FILE_MB = 5
@@ -180,10 +180,8 @@ def analyze_resume(api_key: str, model: str, resume: str, jd: str) -> dict:
         resume=resume[:MAX_RESUME_CHARS],
         jd=jd[:MAX_JD_CHARS] if jd.strip() else "Not provided",
     )
-    config = types.GenerateContentConfig(
-        temperature=0.2,
-        response_mime_type="application/json",
-    )
+    # Gemini 3.x works best with the default temperature, so it is not set here.
+    config = types.GenerateContentConfig(response_mime_type="application/json")
     response = client.models.generate_content(
         model=model, contents=prompt, config=config
     )
@@ -307,6 +305,12 @@ def main() -> None:
                 return
             except Exception as exc:
                 st.error(f"Analysis failed: {exc}")
+                if "404" in str(exc) or "NOT_FOUND" in str(exc):
+                    st.info(
+                        "This model name may have been retired. Check the current "
+                        "name at https://ai.google.dev/gemini-api/docs/models and "
+                        "enter it in the sidebar."
+                    )
                 return
         render_results(result)
 
