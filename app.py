@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import time
 
 import streamlit as st
 from docx import Document
@@ -12,6 +13,9 @@ from google.genai import types
 from pypdf import PdfReader
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = ["gemini-3.7-flash"]  # tried if the main model is busy or retired
+RETRY_CODES = {429, 500, 503, 504}
+MAX_RETRIES = 3  # attempts per model
 MAX_RESUME_CHARS = 15000
 MAX_JD_CHARS = 6000
 MAX_FILE_MB = 5
@@ -190,6 +194,39 @@ def analyze_resume(api_key: str, model: str, resume: str, jd: str) -> dict:
     return normalize(parse_json(response.text))
 
 
+def _error_code(exc: Exception):
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    match = re.match(r"\s*(\d{3})\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
+def analyze_with_retry(api_key: str, model: str, resume: str, jd: str):
+    """Retry temporary errors (e.g. 503 high demand), then try fallback models.
+
+    Returns (result, model_used).
+    """
+    models = [model] + [m for m in FALLBACK_MODELS if m != model]
+    last_exc = None
+    for name in models:
+        for attempt in range(MAX_RETRIES):
+            try:
+                return analyze_resume(api_key, name, resume, jd), name
+            except json.JSONDecodeError as exc:  # bad output: retry once more
+                last_exc = exc
+            except Exception as exc:
+                last_exc = exc
+                code = _error_code(exc)
+                if code == 404:
+                    break  # model retired: go straight to the next model
+                if code not in RETRY_CODES:
+                    raise  # bad key, bad request, etc.: retrying will not help
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s
+    raise last_exc
+
+
 # --------------------------------- UI ------------------------------------
 def score_label(score: int) -> str:
     if score >= 80:
@@ -297,21 +334,26 @@ def main() -> None:
             )
             return
 
-        with st.spinner("Analyzing your resume..."):
+        with st.spinner("Analyzing your resume (this can take up to a minute)..."):
             try:
-                result = analyze_resume(api_key, model.strip() or DEFAULT_MODEL, text, jd)
+                result, used_model = analyze_with_retry(
+                    api_key, model.strip() or DEFAULT_MODEL, text, jd
+                )
             except json.JSONDecodeError:
                 st.error("The AI returned an unreadable response. Please try again.")
                 return
             except Exception as exc:
                 st.error(f"Analysis failed: {exc}")
-                if "404" in str(exc) or "NOT_FOUND" in str(exc):
+                if _error_code(exc) in RETRY_CODES:
+                    st.info("Google's servers are busy right now. Please wait a minute and try again.")
+                if _error_code(exc) == 404:
                     st.info(
                         "This model name may have been retired. Check the current "
                         "name at https://ai.google.dev/gemini-api/docs/models and "
                         "enter it in the sidebar."
                     )
                 return
+        st.caption(f"Analyzed with {used_model}")
         render_results(result)
 
 
